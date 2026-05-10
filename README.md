@@ -56,8 +56,8 @@ This project is licensed under the MIT License.
 
 ## File Structure
 
-
-custom_components/local_lifesmart/
+<pre>
+custom_components/lifesmartlocal/
 ├── __init__.py
 ├── api.py
 ├── const.py
@@ -65,4 +65,5 @@ custom_components/local_lifesmart/
 ├── config_flow.py
 ├── switch.py
 └── README.md
+<pre>
 
