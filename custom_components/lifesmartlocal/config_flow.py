@@ -79,6 +79,59 @@ class LifeSmartConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         _LOGGER.debug("Creating options flow handler for entry: %s", config_entry.entry_id)
         return OptionsFlowHandler(config_entry)
     '''
+    async def async_step_reconfigure(self, user_input=None):
+        """Handle reconfiguration of the integration (e.g., IP or Token change)."""
+        errors = {}
+        # 取得目前的設定檔資料
+        entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
+
+        if user_input is not None:
+            try:
+                user_input[CONF_HOST] = validate_host(user_input[CONF_HOST])
+                user_input[CONF_TOKEN] = validate_token(user_input[CONF_TOKEN])
+
+                # 測試新連線
+                api = LifeSmartAPI(
+                    host=user_input[CONF_HOST],
+                    model=user_input.get("model", DEFAULT_MODEL),
+                    token=user_input[CONF_TOKEN],
+                    timeout=10,
+                    local_port=0
+                )
+                try:
+                    devices = await api.discover_devices()
+                finally:
+                    await api.async_stop()
+
+                if devices:
+                    # 連線成功，保留原本的 local_port，並更新 host 和 token
+                    user_input["local_port"] = entry.data.get("local_port", 0)
+                    return self.async_update_reload_and_abort(
+                        entry,
+                        data={**entry.data, **user_input},
+                        reason="reconfigure_successful"
+                    )
+                else:
+                    errors["base"] = "no_devices"
+                    
+            except vol.Invalid:
+                errors["base"] = "invalid_config"
+            except Exception:
+                errors["base"] = "cannot_connect"
+
+        # 打開視窗時，自動預先填入你原本的舊設定值
+        schema = vol.Schema({
+            vol.Required(CONF_HOST, default=entry.data.get(CONF_HOST, "")): str,
+            vol.Required("model", default=entry.data.get("model", DEFAULT_MODEL)): str,
+            vol.Required(CONF_TOKEN, default=entry.data.get(CONF_TOKEN, "")): str,
+        })
+
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=schema,
+            errors=errors
+        )
+    
     async def async_step_user(self, user_input=None):
         """Handle the initial step."""
         errors = {}
