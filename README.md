@@ -65,12 +65,24 @@ This project is licensed under the MIT License.
 
 <pre>
 custom_components/lifesmartlocal/
+├── README.md
 ├── __init__.py
 ├── api.py
-├── const.py
-├── manifest.json
+├── brand
+│   ├── icon.png
+│   └── logo.png
 ├── config_flow.py
+├── const.py
+├── coordinator.py
+├── cover.py
+├── manifest.json
+├── remote.py
+├── sensor.py
+├── services.yaml
 ├── switch.py
-└── README.md
+├── translation
+│   └── en.json
+└── translations
+    └── en.json
 <pre>
 
