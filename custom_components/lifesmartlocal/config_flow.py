@@ -38,27 +38,8 @@ DATA_SCHEMA = vol.Schema(
         vol.Required(CONF_TOKEN, default="8SptZ2l2xnQlb8bSdT8mwA"): str,
     }
 )
-'''
-class OptionsFlowHandler(config_entries.OptionsFlow):
-    """Handle options flow for LifeSmart integration."""
 
-    def __init__(self, config_entry):
-        """Initialize options flow."""
-        self.config_entry = config_entry
-        _LOGGER.debug("Initializing options flow handler")
 
-    async def async_step_init(self, user_input=None):
-        """Handle options flow."""
-        _LOGGER.debug("Processing options flow init step")
-        if user_input is not None:
-            _LOGGER.debug("Saving options: %s", user_input)
-            return self.async_create_entry(title="", data=user_input)
-
-        return self.async_show_form(
-            step_id="init",
-            data_schema=vol.Schema({})
-        )
-'''
 @config_entries.HANDLERS.register(DOMAIN)
 class LifeSmartConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for LifeSmart Local."""
@@ -71,14 +52,7 @@ class LifeSmartConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         _LOGGER.debug("Initializing LifeSmart config flow")
         self._errors = {}
         self.config_entry = None
-    '''
-    @staticmethod
-    @callback
-    def async_get_options_flow(config_entry):
-        """Get the options flow for this handler."""
-        _LOGGER.debug("Creating options flow handler for entry: %s", config_entry.entry_id)
-        return OptionsFlowHandler(config_entry)
-    '''
+
     async def async_step_reconfigure(self, user_input=None):
         """Handle reconfiguration of the integration (e.g., IP or Token change)."""
         errors = {}

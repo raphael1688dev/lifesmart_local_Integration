@@ -1,33 +1,19 @@
-"""LifeSmart Remote Platform"""
-import asyncio
+"""Platform for LifeSmart Remote integration."""
 import logging
-import re
-import time
-from typing import Any, Dict, List
-
-from homeassistant.components import remote
+import random
+import asyncio
+from typing import Any, Iterable
+from homeassistant.components.remote import RemoteEntity, RemoteEntityFeature
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.entity import DeviceInfo
-
 from .const import DOMAIN, MANUFACTURER
+from . import generate_entity_id
 
 _LOGGER = logging.getLogger(__name__)
 
-SUPPORTED_REMOTE_TYPES = ["SL_P_IR"]
-
-def _normalize_devtype(devtype: Any) -> str:
-    if not isinstance(devtype, str):
-        return ""
-    return re.sub(r"\s+", "", devtype).upper()
-
-def _slugify(text: Any) -> str:
-    base = (text or "").strip().lower()
-    base = re.sub(r"[^a-z0-9]+", "_", base)
-    base = re.sub(r"_+", "_", base).strip("_")
-    return base or "remote"
+SUPPORTED_REMOTE_TYPES = ["SL_P_IR", "MSL_IRCTL", "OD_WE_IRCTL"]
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -35,219 +21,148 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up LifeSmart Remote devices."""
-    _LOGGER.info("Setting up LifeSmart remotes")
+    _LOGGER.debug("Setting up LifeSmart remotes")
     entry_data = hass.data[DOMAIN]["entries"][config_entry.entry_id]
     api = entry_data["api"]
     devices = entry_data.get("devices") or []
-    if not devices:
-        devices_data = await api.discover_devices()
-        if isinstance(devices_data, dict) and isinstance(devices_data.get("msg"), list):
-            devices = devices_data["msg"]
-            entry_data["devices"] = devices
     
-    remotes: List[LifeSmartRemote] = []
+    remotes = []
+    # 根據 Advanced 規範 2.4，抓取紅外線遙控器清單
+    remote_list = await api.get_remote_list()
     
     if isinstance(devices, list):
-        remote_list = await api.get_remote_list()
-        if not isinstance(remote_list, list):
-            _LOGGER.warning("Failed to load remote list from hub")
-            remote_list = []
-        device_remotes = {}
-        
         for device in devices:
-            devtype = _normalize_devtype(device.get("devtype"))
-            if devtype in SUPPORTED_REMOTE_TYPES:
-                device_id = device["me"]
-                if device_id not in device_remotes:
-                    device_remotes[device_id] = {
-                        "device": device,
-                        "remotes": []
-                    }
-                
-                for remote_data in remote_list:
-                    if device_id in remote_data["remote"]["id"]:
-                        device_remotes[device_id]["remotes"].append(remote_data)
-        
-        registry = er.async_get(hass)
+            if device.get("devtype") in SUPPORTED_REMOTE_TYPES:
+                device_keys = []
+                if remote_list:
+                    for rm in remote_list:
+                        if rm.get("remote", {}).get("agt") == device.get("agt"):
+                            device_keys = rm.get("keys", [])
+                            break
+                remotes.append(LifeSmartRemote(api, device, device_keys))
 
-        for device_id, data in device_remotes.items():
-            desired_object_id = f"{_slugify(data['device'].get('name') or 'remote')}_{device_id}".lower()
-            desired_entity_id = f"remote.{desired_object_id}"
-            unique_id = f"lifesmartlocal_remote_{device_id}"
-            existing_entity_id = registry.async_get_entity_id("remote", DOMAIN, unique_id)
-            if existing_entity_id and existing_entity_id != desired_entity_id and registry.async_get(desired_entity_id) is None:
-                registry.async_update_entity(existing_entity_id, new_entity_id=desired_entity_id)
-
-            remotes.append(
-                LifeSmartRemote(
-                    api=api,
-                    device=data["device"],
-                    remote_data_list=data["remotes"],
-                    name=data["device"].get("name", "Remote")
-                )
-            )
-    
     async_add_entities(remotes)
 
-class LifeSmartRemote(remote.RemoteEntity):
-    """LifeSmart Remote Entity."""
+class LifeSmartRemote(RemoteEntity):
     _attr_should_poll = False
+    _attr_has_entity_name = True
+    _attr_name = None 
+    _attr_supported_features = RemoteEntityFeature.ACTIVITY
 
-    def __init__(self, api, device: Dict[str, Any], remote_data_list: List[Dict[str, Any]], name: str):
+    def __init__(self, api, device, remote_keys):
         """Initialize the remote."""
         self._api = api
         self._device = device
-
-        self._remote_data_list = remote_data_list
-        self._attr_name = f"{name}_{device['me']}"
-        device_id = device["me"]
-        self._attr_unique_id = f"lifesmartlocal_remote_{device_id}"
-        base = _slugify(device.get("name") or name or "remote")
-        self.entity_id = f"remote.{base}_{device_id}"
         self._available = True
-
-
-        self._all_keys = {}
-        self._remote_details = {}
-        self._refresh_lock = asyncio.Lock()
-        self._last_refresh = 0.0
-        self._failures = 0
-
-        for remote_data in remote_data_list:
-            remote_id = remote_data["remote"]["id"]
-            self._remote_details[remote_id] = {
-                "name": remote_data["remote"].get("name", ""),
-                "category": remote_data["remote"].get("category", ""),
-                "brand": remote_data["remote"].get("brand", ""),
-                "keys": remote_data["keys"]
-            }
-            self._all_keys.update({key: remote_id for key in remote_data["keys"]})
+        self._remote_keys = remote_keys
+        self._unsub_stat = None
+        self._unsub_gw = None
         
-      
-        _LOGGER.debug("Initializing LifeSmart remote: %s", self._attr_name)
+        device_type = device.get('devtype')
+        hub_id = device.get('agt', '')
+        device_id = device['me']
+        
+        self._attr_unique_id = f"lifesmartlocal_remote_{device_id}"
+        self.entity_id = f"remote.{generate_entity_id(device_type, hub_id, device_id, 'remote')}"
+        
+        # 建立指令對應字典
+        self._key_map = {key.get("name"): key.get("id") for key in remote_keys if "name" in key and "id" in key}
 
-    async def _async_refresh_data(self, force: bool = False) -> None:
-        now = time.monotonic()
-        if not force and self._remote_details and (now - self._last_refresh) < 60:
-            return
-        async with self._refresh_lock:
-            now = time.monotonic()
-            if not force and self._remote_details and (now - self._last_refresh) < 60:
-                return
-            remote_list = await self._api.get_remote_list()
-            if not isinstance(remote_list, list):
-                return
+        # 初始狀態判定：如果設備快取資料顯示離線，預設標記為不可用
+        if device.get("stat") == 0:
+            self._available = False
 
-            device_id = self._device["me"]
-            details = {}
-            all_keys = {}
-            for remote_data in remote_list:
-                remote = remote_data.get("remote") if isinstance(remote_data, dict) else None
-                keys = remote_data.get("keys") if isinstance(remote_data, dict) else None
-                if not isinstance(remote, dict) or not isinstance(keys, list):
-                    continue
-                remote_id = remote.get("id")
-                if not isinstance(remote_id, str) or device_id not in remote_id:
-                    continue
-                details[remote_id] = {
-                    "name": remote.get("name", ""),
-                    "category": remote.get("category", ""),
-                    "brand": remote.get("brand", ""),
-                    "keys": keys,
-                }
-                for k in keys:
-                    if isinstance(k, str):
-                        all_keys[k] = remote_id
+    async def async_added_to_hass(self):
+        """When entity is added to hass."""
+        # 補齊防禦機制：監聽紅外線發射器本身的存活狀態，以及網關整體的存活狀態
+        self._unsub_stat = self._api.register_state_listener(self._device["me"], "stat", self._handle_device_stat)
+        self._unsub_gw = self._api.register_gw_listener(self._handle_gw_status)
+        self.async_write_ha_state()
 
-            if details:
-                self._remote_details = details
-                self._all_keys = all_keys
-                self._last_refresh = time.monotonic()
+    async def async_will_remove_from_hass(self):
+        """When entity is removed from hass."""
+        if self._unsub_stat:
+            self._unsub_stat()
+        if self._unsub_gw:
+            self._unsub_gw()
+
+    def _handle_device_stat(self, stat_val):
+        """處理設備上線/離線推播"""
+        self._available = bool(stat_val)
+        if self.hass:
+            #self.hass.async_create_task(self._async_write_state())
+            self.hass.async_create_background_task(self._async_write_state(), "lifesmart_update_task")
+
+    
+    def _handle_gw_status(self, gw_available: bool):
+        """處理網關整體死機/復活廣播"""
+        was_available = getattr(self, "_available", False)
+        self._available = gw_available
+        
+        # 🚀 終極修補：當網關從「斷線」恢復為「上線」時，強制抓取最新狀態
+        if gw_available and not was_available:
+            if self.hass:
+                async def _delayed_update():
+                    # 隨機延遲 0.1 到 3.0 秒，完美錯開全家設備的併發請求，保護網關晶片
+                    await asyncio.sleep(random.uniform(0.1, 3.0))
+                    await self._async_update_state()
+                #self.hass.async_create_task(_delayed_update())
+                self.hass.async_create_background_task(_delayed_update(), "lifesmart_update_task")
+        elif self.hass:
+            #self.hass.async_create_task(self._async_write_state())
+            self.hass.async_create_background_task(self._async_write_state(), "lifesmart_update_task")
+
+    async def _async_write_state(self):
+        self.async_write_ha_state()
 
     @property
-    def name(self) -> str:
-        """Return the name of the remote."""
-        return self._attr_name
-
-    @property
-    def available(self) -> bool:
-        """Return True if entity is available."""
+    def available(self):
         return self._available
 
     @property
-    def supported_features(self) -> int:
-        """Return the list of supported features."""
-        return remote.RemoteEntityFeature.ACTIVITY
+    def is_on(self) -> bool:
+        """Return true if remote is on. Always true for IR blasters."""
+        return True
 
+    
     @property
     def device_info(self) -> DeviceInfo:
+        """Return device info to Home Assistant."""
         return DeviceInfo(
-            identifiers={(DOMAIN, self._device["me"])},
-            name=self._device.get("name", "LifeSmart Remote"),
+            identifiers={(DOMAIN, self._device['me'])},
+            name=self._device.get('name', 'LifeSmart Device'),
             manufacturer=MANUFACTURER,
-            model=self._device.get("devtype"),
-            sw_version=self._device.get("epver"),
+            model=self._device.get('devtype'),
+            # 將版本號轉為字串以符合 HA 規範
+            sw_version=str(self._device.get('epver', 'Unknown')),
+            # 新增這行：將 API 的 'me' 欄位作為序號顯示
+            serial_number=self._device.get('me'),
         )
 
-    @property
-    def extra_state_attributes(self) -> Dict[str, Any]:
-        """Return the state attributes."""
-        attributes = {
-            "agt": self._device.get("agt"),
-            "me": self._device.get("me"),
-            "devtype": self._device.get("devtype"),
-            "remotes": self._remote_details,
-            "all_commands": list(self._all_keys.keys())
-        }
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Turn the remote on."""
+        pass
 
-        return attributes
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Turn the remote off."""
+        pass
 
-    async def async_send_command(self, command: List[str], **kwargs: Any) -> None:
-        """Send commands remote_id to a device."""      
-        if not self._remote_details:
+    
+    async def async_send_command(self, command: Iterable[str], **kwargs: Any) -> None:
+        """Send a command to a device."""
+        #import asyncio # 確保頂部有引入
+
+        for idx, cmd in enumerate(command):
+            # 物理防禦：多重紅外線指令連發時，強制加入 1 秒間隔，避免網關當機與漏發
+            if idx > 0:
+                await asyncio.sleep(1)
+                
+            key_id = self._key_map.get(cmd)
+            if not key_id:
+                _LOGGER.warning("Command %s not found in remote %s", cmd, self._attr_unique_id)
+                continue
+                
             try:
-                await self._async_refresh_data(force=True)
-            except Exception:
-                return
-
-        for cmd in command:
-            if "::" in cmd:
-                remote_id, key = cmd.split("::")
-                if remote_id not in self._remote_details:
-                    await self._async_refresh_data(force=True)
-                if remote_id in self._remote_details and key in self._remote_details[remote_id]["keys"]:
-                    for attempt in range(3):
-                        try:
-                            await self._api.send_remote_key(remote_id, key)
-                            self._available = True
-                            self._failures = 0
-                            break
-                        except asyncio.TimeoutError:
-                            self._failures += 1
-                            if self._failures >= 3:
-                                self._available = False
-                            if attempt == 2:
-                                break
-                        except Exception as ex:
-                            _LOGGER.error("Unexpected error sending command %s to remote %s: %s", key, remote_id, type(ex).__name__)
-                            break
-            else:
-                if cmd not in self._all_keys:
-                    await self._async_refresh_data(force=True)
-                remote_id = self._all_keys.get(cmd)
-                if remote_id:
-                    for attempt in range(3):
-                        try:
-                            await self._api.send_remote_key(remote_id, cmd)
-                            self._available = True
-                            self._failures = 0
-                            break
-                        except asyncio.TimeoutError:
-                            self._failures += 1
-                            if self._failures >= 3:
-                                self._available = False
-                            if attempt == 2:
-                                break
-                        except Exception as ex:
-                            _LOGGER.error("Error sending command %s to remote %s: %s", cmd, remote_id, type(ex).__name__)
-                            break
+                await self._api.send_remote_key(key_id, cmd)
+            except Exception as ex:
+                _LOGGER.error("Failed to send command %s: %s", cmd, ex)
